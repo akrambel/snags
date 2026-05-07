@@ -21,13 +21,15 @@ header { padding:18px 28px 16px; background:rgba(255,255,255,.96); border-bottom
 h1 { margin:0 0 6px; font-size:28px; letter-spacing:0; color:var(--brand2); }
 .sub { color:var(--muted); font-size:14px; }
 .shell { padding:22px 28px 34px; max-width:1500px; margin:0 auto; }
-.controls { display:grid; grid-template-columns: minmax(220px,1.4fr) repeat(3,minmax(150px,1fr)) auto; gap:12px; align-items:end; margin-bottom:18px; }
+.controls { display:grid; grid-template-columns: minmax(220px,1.4fr) repeat(3,minmax(150px,1fr)) auto auto; gap:12px; align-items:end; margin-bottom:18px; }
   .control { display:flex; flex-direction:column; gap:6px; min-width:0; }
 label { font-size:12px; font-weight:700; color:#3e4b55; text-transform:uppercase; letter-spacing:.04em; }
 select,input { width:100%; border:1px solid var(--line); border-radius:8px; background:#fff; min-height:40px; padding:9px 10px; color:var(--ink); font:inherit; box-shadow:0 3px 10px rgba(93,52,60,.04); }
 select:focus,input:focus { outline:2px solid rgba(197,31,58,.18); border-color:var(--brand); }
 button { border:1px solid var(--brand); background:var(--brand); color:#fff; border-radius:8px; min-height:40px; padding:0 14px; font-weight:700; cursor:pointer; box-shadow:0 8px 18px rgba(197,31,58,.18); }
 button:hover { background:var(--brand2); border-color:var(--brand2); color:#fff; }
+.export-btn { background:#201a1c; border-color:#201a1c; }
+.export-btn:hover { background:#3b3134; border-color:#3b3134; }
 body.auth-locked { overflow:hidden; }
 body.auth-locked > header,
 body.auth-locked > main,
@@ -96,6 +98,7 @@ th { color:var(--brand2); font-size:12px; text-transform:uppercase; letter-spaci
     <div class="control"><label for="byFilter">Snagged By</label><select id="byFilter"></select></div>
     <div class="control"><label for="searchBox">Search</label><input id="searchBox" placeholder="Room, area, name"></div>
     <button id="resetBtn">Reset</button>
+    <button id="exportBtn" class="export-btn" type="button">Export PDF</button>
   </section>
   <section class="kpis" id="kpiBox"></section>
   <section class="grid">
@@ -213,6 +216,7 @@ function statusTotals(rows, activeSheet) {
   const raised = fromSheet ? Number(summary.raised || open + closed || 0) : sum(rows,'raised');
   return { raised, open, closed, fromSheet };
 }
+function hasActiveFilters() { return state.area !== 'all' || state.by !== 'all' || !!state.q.trim(); }
 function groupBy(rows, key) { const m = new Map(); rows.forEach(r => { const k = r[key] || 'Unassigned'; if(!m.has(k)) m.set(k, []); m.get(k).push(r); }); return [...m.entries()]; }
 function barSvg(items, opts={}) {
   const h = Math.max(230, items.length * 34 + 34), w = 720, left = 150, right = 24, max = Math.max(1, ...items.map(i => i.value));
@@ -235,7 +239,9 @@ function stageStats(rows) {
   return [...stageMap.entries()].slice(0,5).map(([label,x]) => ({ label: label.replace('Stage ','S').replace('Completion of ', '').replace('Operator Inspection', 'Inspection'), value:x.done, pct:x.total?Math.round(x.done/x.total*100):0, color: colors.brand }));
 }
 function renderCharts(rows, activeSheet) {
-  const byArea = groupBy(rows.map(r => ({...r, chartArea: areaFilterValue(r) || r.area || 'Unassigned'})),'chartArea')
+  const byArea = !hasActiveFilters() && normValue(activeSheet?.name) !== 'menu'
+    ? [{ label: activeSheet.name, ...statusTotals(rows, activeSheet) }]
+    : groupBy(rows.map(r => ({...r, chartArea: areaFilterValue(r) || r.area || activeSheet?.name || 'Unassigned'})),'chartArea')
     .map(([label,rs]) => ({label, raised:sum(rs,'raised'), open:sum(rs,'open'), closed:sum(rs,'closed')}))
     .filter(item => (item.raised + item.open + item.closed) > 0)
     .sort((a,b)=>(b.raised || b.open+b.closed)-(a.raised || a.open+a.closed)).slice(0,10);
@@ -254,6 +260,58 @@ function renderTable(rows) {
   if (!rows.length) { qs('tableBox').innerHTML = '<div class="empty">No rows match the current filters.</div>'; return; }
   const top = rows;
   qs('tableBox').innerHTML = `<div class="small">Showing ${fmt.format(top.length)} of ${fmt.format(rows.length)} records</div><table><thead><tr><th>Status</th><th>Area / Cluster</th><th>Room No</th><th>Room Name</th><th>Snagged By</th><th>Date</th><th>Raised</th><th>Open</th><th>Closed</th></tr></thead><tbody>${top.map(r => { const st=statusOf(r); return `<tr><td><span class="status ${st === 'open' ? 'open' : st === 'closed' ? 'closed' : 'none'}">${st === 'open' ? 'Open' : st === 'closed' ? 'Closed' : 'No count'}</span></td><td>${esc(r.area || 'Unassigned')}</td><td>${esc(r.roomNo)}</td><td>${esc(r.roomName)}</td><td>${esc(r.snaggedBy)}</td><td>${esc(r.snaggedDate)}</td><td>${fmt.format(r.raised||0)}</td><td>${fmt.format(r.open||0)}</td><td>${fmt.format(r.closed||0)}</td></tr>`; }).join('')}</tbody></table>`;
+}
+function reportTotals(rows, activeSheet) {
+  if (!hasActiveFilters()) return statusTotals(rows, activeSheet);
+  return { raised: sum(rows,'raised'), open: sum(rows,'open'), closed: sum(rows,'closed'), fromSheet: false };
+}
+function reportFileName(name) {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const safe = String(name || 'dashboard').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'dashboard';
+  return `snagging-report-${safe}-${stamp}.pdf`;
+}
+function exportReport() {
+  const s = sheet();
+  const rows = filteredRows();
+  const totals = reportTotals(rows, s);
+  const noCount = rows.filter(r => statusOf(r) === 'noSnags').length;
+  const avgClosed = totals.raised ? Math.round((totals.closed / totals.raised) * 100) : 0;
+  const filters = [
+    ['Sheet', s.name],
+    ['Area / Cluster', state.area === 'all' ? 'All areas' : state.area],
+    ['Snagged By', state.by === 'all' ? 'All people' : state.by],
+    ['Search', state.q.trim() || 'None'],
+    ['Filtered Records', fmt.format(rows.length)]
+  ];
+  const byArea = !hasActiveFilters() && normValue(s.name) !== 'menu'
+    ? [{ label: s.name, raised: totals.raised, open: totals.open, closed: totals.closed }]
+    : groupBy(rows.map(r => ({...r, chartArea: areaFilterValue(r) || r.area || s.name || 'Unassigned'})),'chartArea')
+    .map(([label,rs]) => ({label, raised:sum(rs,'raised'), open:sum(rs,'open'), closed:sum(rs,'closed')}))
+    .sort((a,b)=>(b.raised || b.open+b.closed)-(a.raised || a.open+a.closed));
+  const rowHtml = rows.map(r => {
+    const st = statusOf(r);
+    const label = st === 'open' ? 'Open' : st === 'closed' ? 'Closed' : 'No count';
+    return `<tr><td>${esc(label)}</td><td>${esc(r.area || 'Unassigned')}</td><td>${esc(r.roomNo)}</td><td>${esc(r.roomName)}</td><td>${esc(r.snaggedBy)}</td><td>${esc(r.snaggedDate)}</td><td>${fmt.format(r.raised||0)}</td><td>${fmt.format(r.open||0)}</td><td>${fmt.format(r.closed||0)}</td></tr>`;
+  }).join('');
+  const areaHtml = byArea.map(item => `<tr><td>${esc(item.label)}</td><td>${fmt.format(item.raised)}</td><td>${fmt.format(item.open)}</td><td>${fmt.format(item.closed)}</td></tr>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(reportFileName(s.name))}</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;color:#201a1c;margin:28px;background:#fff}header{border-bottom:3px solid #c51f3a;padding-bottom:14px;margin-bottom:18px}h1{margin:0;color:#8f172b;font-size:28px}h2{color:#8f172b;margin:24px 0 10px;font-size:18px}.meta{color:#6d6063;margin-top:6px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:16px 0}.card{border:1px solid #eadedf;border-top:4px solid #c51f3a;border-radius:8px;padding:12px}.label{font-size:11px;text-transform:uppercase;color:#6d6063;font-weight:700}.value{font-size:22px;font-weight:800;margin-top:5px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}th,td{border:1px solid #eadedf;padding:7px;text-align:left;vertical-align:top}th{background:#fff7f6;color:#8f172b;text-transform:uppercase;font-size:11px}.filters td:first-child{font-weight:700;color:#8f172b;width:180px}@media print{body{margin:12mm}.cards{grid-template-columns:repeat(5,1fr)}}
+</style></head><body><header><h1>Snagging Tracker Report</h1><div class="meta">Generated ${esc(new Date().toLocaleString())}</div></header>
+<h2>Applied Filters</h2><table class="filters"><tbody>${filters.map(([k,v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</tbody></table>
+<section class="cards"><div class="card"><div class="label">Total Snag Raised</div><div class="value">${fmt.format(totals.raised)}</div></div><div class="card"><div class="label">Open</div><div class="value">${fmt.format(totals.open)}</div></div><div class="card"><div class="label">Closed</div><div class="value">${fmt.format(totals.closed)}</div></div><div class="card"><div class="label">Average Closed</div><div class="value">${avgClosed}%</div></div><div class="card"><div class="label">No Count</div><div class="value">${fmt.format(noCount)}</div></div></section>
+<h2>Open vs Closed by Area</h2><table><thead><tr><th>Area / Cluster</th><th>Total Snag Raised</th><th>Open</th><th>Closed</th></tr></thead><tbody>${areaHtml || '<tr><td colspan="4">No area data.</td></tr>'}</tbody></table>
+<h2>Filtered Records</h2><table><thead><tr><th>Status</th><th>Area / Cluster</th><th>Room No</th><th>Room Name</th><th>Snagged By</th><th>Date</th><th>Raised</th><th>Open</th><th>Closed</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9">No rows match the current filters.</td></tr>'}</tbody></table>
+</body></html>`;
+  const reportWindow = window.open('', '_blank');
+  if (!reportWindow) {
+    alert('Please allow pop-ups for this dashboard, then click Export PDF again.');
+    return;
+  }
+  reportWindow.document.open();
+  reportWindow.document.write(html);
+  reportWindow.document.close();
+  reportWindow.focus();
+  setTimeout(() => reportWindow.print(), 350);
 }
 function render() {
   refreshFilters();
@@ -435,6 +493,7 @@ qs('areaFilter').addEventListener('change', e => { state.area=e.target.value; re
 qs('byFilter').addEventListener('change', e => { state.by=e.target.value; render(); });
 qs('searchBox').addEventListener('input', e => { state.q=e.target.value; render(); });
 qs('resetBtn').addEventListener('click', () => { state.area='all'; state.by='all'; state.q=''; render(); });
+qs('exportBtn').addEventListener('click', exportReport);
 if (setupPasswordGate()) initDashboard();
 </script>
 
